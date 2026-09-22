@@ -13,6 +13,11 @@
 #   HARD  = 24400 B  -- e folott a vege MAR NEM toltodik be (nema adatvesztes)
 #   WARN  = 20000 B  -- itt ebresztunk, hogy legyen ido vagni ELOTTE
 #   CEL   = 17100 B  -- a hook sajat celertek, nem limit
+# A ket kuszob SZERZODESET a scripts/__tests__/memory-index-gate-hard-threshold.test.sh
+# rogziti (MEMHARD922). Kulon fajl, mert a HARD irany az, amire a tobbi suite
+# nem adott bemenetet: mindharom `over_hard` allitasuk `false`-ot vart, es egyik
+# fixture sem nott a HARD fole -- az a verdikt tehat, amelyik azt mondja, hogy a
+# lap vege MAR elveszett, meresetlen allt.
 #
 # A MASODIK MERES: EGY FORRO SOR HOSSZA (LINEWARN = 800 B).
 # A meret-kuszob csak akkor szol, amikor MAR vagni kell. Egy nap alatt negyszer
