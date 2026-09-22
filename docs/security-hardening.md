@@ -184,7 +184,7 @@ project `settings.json` or `settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/browser-content-notice.py\"",
+            "command": "bash -c '[ -f /ABSOLUTE/PATH/TO/marveen/scripts/hooks/browser-content-notice.py ] && exec python3 /ABSOLUTE/PATH/TO/marveen/scripts/hooks/browser-content-notice.py; exit 0'",
             "timeout": 10
           }
         ]
@@ -193,6 +193,26 @@ project `settings.json` or `settings.local.json`:
   }
 }
 ```
+
+Write that path out in full. **`$CLAUDE_PROJECT_DIR` is the wrong anchor here,
+and it fails in the one direction nobody watches** (measured on Claude Code
+2.1.261, BROWSERSCOPE922): the two settings files have different scopes.
+`.claude/settings.json` is resolved from the session's own working directory,
+so it configures the one agent rooted at this checkout. `.claude/settings.local.json`
+is resolved from the **canonical git root**, so in a fleet whose agents live in
+subdirectories of this repo it configures **every one of them**. The hook
+process, meanwhile, is handed `CLAUDE_PROJECT_DIR` = its own session cwd. A
+`$CLAUDE_PROJECT_DIR`-anchored command written into `settings.local.json`
+therefore resolves to `<that agent's directory>/scripts/hooks/...`, which does
+not exist -- and a `PostToolUse` hook that dies is an execution-error record,
+not part of the tool result, so the model sees the raw browser payload with
+**no envelope and no warning**. Two sub-agents took 78 such calls that way in a single day before anyone
+noticed (2026-09-21).
+
+The guard (`[ -f ... ] &&`) is the second half of the same lesson: if the path
+is ever wrong, the hook should decline quietly rather than fail on every call.
+`src/__tests__/hook-registration-completeness.test.ts` pins this shape for any
+checkout that has the file.
 
 ### The shape rule, and the silent fallback behind it
 

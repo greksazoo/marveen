@@ -34,6 +34,18 @@ const HOOKS_DIR = join(ROOT, 'scripts', 'hooks')
 //   is this checkout, i.e. the main agent -- through the repo's own project
 //   settings.
 //
+//   TREEWIDE surfaces configure EVERY agent whose session cwd is anywhere
+//   inside this checkout. There is exactly one, and it is the sibling of the
+//   checkout surface, which is why it reads like one: measured on Claude Code
+//   2.1.261 (BROWSERSCOPE922), `.claude/settings.json` is resolved from the
+//   session's cwd, but `.claude/settings.local.json` is resolved from the
+//   CANONICAL GIT ROOT. A fleet whose agents live in subdirectories of this
+//   repo therefore shares one settings.local.json, while each agent keeps its
+//   own settings.json. It is gitignored, so it ships with no install and is
+//   not a registration surface here -- but what an operator puts in it reaches
+//   every agent, and the test at the bottom of this file pins the one shape
+//   that silently breaks when it does.
+//
 // The two are not interchangeable, and the single concatenated corpus this
 // lint used to build treated them as if they were: telegram-reply-directive.py
 // was registered in .claude/settings.json (one agent) and absent from the
@@ -50,6 +62,7 @@ const SEEDING_SURFACES = [
   'scripts/install-channel-image-hook.sh',
 ]
 const CHECKOUT_SURFACES = ['.claude/settings.json']
+const TREEWIDE_SURFACES = ['.claude/settings.local.json']
 const REGISTRATION_SURFACES = [...SEEDING_SURFACES, ...CHECKOUT_SURFACES]
 
 // name -> why it is allowed to be unregistered. Keep every reason concrete;
@@ -72,7 +85,7 @@ const EXEMPT: Record<string, string> = {
   'telegram-image-resize.sh':
     'legacy predecessor of channel-image-resize.sh; only its old installer migration path named it, and since #1305 that installer is a no-op stub -- kept pending a maintainer decision to remove it',
   'browser-content-notice.py':
-    'OPT-IN by construction (BROWSERNOTICE920): it envelopes browser-MCP / WebSearch payloads as untrusted content, and an install without a browser MCP server gains nothing from it. Wiring it here would fire it on every fleet member, most of which have no browser. Operators add it to their own PostToolUse hooks -- the procedure is in docs/security-hardening.md.',
+    'OPT-IN by construction (BROWSERNOTICE920): it envelopes browser-MCP / WebSearch payloads as untrusted content, and an install without a browser MCP server gains nothing from it, so no SHIPPED surface wires it and this entry stays. What BROWSERSCOPE922 corrected is the second half of the old reason, "operators add it to their own PostToolUse hooks": the natural place for that, this checkout\'s gitignored .claude/settings.local.json, is a TREEWIDE surface (see the header) -- it fires on every agent whose cwd is inside the repo, not just the one that wired it. So the opt-in is repo-wide, and its command must be an absolute path; the $CLAUDE_PROJECT_DIR form the docs used to prescribe resolved to each sub-agent\'s own directory and died there silently, on 78 measured browser calls across two sub-agents in one day (2026-09-21). Procedure: docs/security-hardening.md.',
   'mio-orszem-precheck.sh':
     'scheduler preCheck for the HOST-LOCAL marveen-io-kozosseg-orszem task (ORSICTX912): the mio community sentinel is this install\'s own and deliberately NOT seeded (a repo seed would ship it to every customer install), so its registration lives in the host ~/.claude/scheduled-tasks task-config -- outside this corpus by design. Wiring is gated on the ORSICTX912 activation order (host restart -> verify -> merge -> build+restart); the hermetic fail-direction tests are scripts/__tests__/mio-orszem-precheck.test.py.',
 }
@@ -218,5 +231,64 @@ describe('seeding vs checkout surfaces (TGSABLONHOOK921: the main agent\'s own s
     expect(unseededCheckoutHooks(names, checkoutCorpus, seededA, { 'b.py': 'main-only by design' })).toEqual([])
     // A hook the checkout does not wire is nobody's problem here (c.py).
     expect(unseededCheckoutHooks(names, checkoutCorpus, '', { 'a.py': 'x', 'b.py': 'y' })).toEqual([])
+  })
+})
+
+// A TREEWIDE surface reaches every agent in the tree, but each hook process
+// still gets CLAUDE_PROJECT_DIR = its OWN session cwd. A command that resolves
+// its script through that variable therefore works only for the agent rooted at
+// the checkout and breaks for every other one -- silently, because a failed
+// PostToolUse hook is an execution-error record, not part of the tool result
+// the model sees. Pure, so the mechanism is pinned on synthetic input rather
+// than on whether the machine running the suite happens to have the file.
+export function projectDirBoundCommands(commands: readonly string[]): string[] {
+  return commands.filter((c) => c.includes('scripts/hooks/') && /\$\{?CLAUDE_PROJECT_DIR\b/.test(c))
+}
+
+function treewideHookCommands(): string[] {
+  const commands: string[] = []
+  for (const rel of TREEWIDE_SURFACES) {
+    const path = join(ROOT, rel)
+    if (!existsSync(path)) continue
+    // Not wrapped in try/catch on purpose: a settings file this checkout
+    // cannot parse is a finding, not something to skip past quietly.
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'))
+    const hooks = (parsed as { hooks?: unknown }).hooks
+    if (typeof hooks !== 'object' || hooks === null) continue
+    for (const matchers of Object.values(hooks as Record<string, unknown>)) {
+      if (!Array.isArray(matchers)) continue
+      for (const matcher of matchers) {
+        const entries = (matcher as { hooks?: unknown }).hooks
+        if (!Array.isArray(entries)) continue
+        for (const entry of entries) {
+          const command = (entry as { command?: unknown }).command
+          if (typeof command === 'string') commands.push(command)
+        }
+      }
+    }
+  }
+  return commands
+}
+
+describe('tree-wide surface (BROWSERSCOPE922: settings.local.json is read from the GIT ROOT, so it configures every agent in the tree)', () => {
+  it('the mechanism flags a $CLAUDE_PROJECT_DIR-bound hook command, and clears an absolute one', () => {
+    const bound = 'python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/browser-content-notice.py"'
+    const braced = 'python3 "${CLAUDE_PROJECT_DIR}/scripts/hooks/browser-content-notice.py"'
+    const absolute = "bash -c '[ -f /srv/marveen/scripts/hooks/browser-content-notice.py ] && exec python3 /srv/marveen/scripts/hooks/browser-content-notice.py; exit 0'"
+    expect(projectDirBoundCommands([bound, braced, absolute])).toEqual([bound, braced])
+    expect(projectDirBoundCommands([absolute])).toEqual([])
+    // The variable is only a problem for a script this repo ships; an
+    // operator's own unrelated command is none of this lint's business.
+    expect(projectDirBoundCommands(['echo "$CLAUDE_PROJECT_DIR"'])).toEqual([])
+  })
+
+  it('this checkout wires no scripts/hooks script through $CLAUDE_PROJECT_DIR in a tree-wide surface', () => {
+    // Vacuously true on a fresh clone (the file is gitignored and absent);
+    // it bites on the installs that actually wire the opt-in hook.
+    const bound = projectDirBoundCommands(treewideHookCommands())
+    expect(
+      bound,
+      `tree-wide hook commands bound to $CLAUDE_PROJECT_DIR: ${bound.join(' | ')} -- ${TREEWIDE_SURFACES.join(', ')} is read from the git root, so this resolves to each agent's OWN directory and the hook dies silently for every agent but the checkout's. Use an absolute path, guarded: bash -c '[ -f <abs> ] && exec python3 <abs>; exit 0'`,
+    ).toEqual([])
   })
 })
